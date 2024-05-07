@@ -1,8 +1,20 @@
 use spdx_rs::models::RelationshipType;
+use tokio_postgres::types::{FromSql, ToSql};
 
 #[derive(
-    Copy, Clone, Eq, PartialEq, Debug, Hash, strum::IntoStaticStr, strum::Display, strum::EnumIter,
+    Copy,
+    Clone,
+    Eq,
+    PartialEq,
+    Debug,
+    Hash,
+    strum::IntoStaticStr,
+    strum::Display,
+    strum::EnumIter,
+    ToSql,
+    FromSql,
 )]
+#[postgres(name = "relationship")]
 pub enum Relationship {
     Describes,
     Contains,
@@ -36,8 +48,8 @@ impl Relationship {
             RelationshipType::ExampleOf => {}
             */
             RelationshipType::Generates => (a, Self::Generates, b),
+            RelationshipType::GeneratedFrom => (b, Self::Generates, a),
             /*
-            RelationshipType::GeneratedFrom => {}
             RelationshipType::AncestorOf => {}
             RelationshipType::DescendantOf => {}*/
             RelationshipType::VariantOf => (a, Self::VariantOf, b),

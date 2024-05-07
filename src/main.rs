@@ -5,7 +5,9 @@ use crate::db::Database;
 use clap::Parser;
 use serde_json::Value;
 use spdx_rs::models::SPDX;
+use std::collections::HashMap;
 use std::fs::File;
+use std::future::Future;
 use std::io::{BufReader, BufWriter};
 use std::path::{Path, PathBuf};
 use tokio::task::spawn_blocking;
@@ -42,12 +44,29 @@ async fn main() {
     cli.run().await.unwrap();
 }
 
+#[derive(Default)]
+struct DetectDuplicates(pub HashMap<String, Vec<PathBuf>>);
+
+impl DetectDuplicates {
+    pub fn dump(self) {
+        for (k, v) in self.0 {
+            if v.len() > 1 {
+                log::warn!("Duplicates: {k}");
+                for f in v {
+                    log::warn!("    {}", f.display());
+                }
+            }
+        }
+    }
+}
+
 impl Cli {
     pub async fn run(self) -> anyhow::Result<()> {
         let mut db =
-            Database::new("host=localhost port=5433 user=postgres password=postgres").await?;
-        // db.execute(r#"LOAD 'age'"#, &[]).await?;
-        // db.execute(r#"SET search_path = ag_catalog, "$user", public"#, &[]).await?;
+            Database::new("host=localhost port=5432 user=postgres password=postgres").await?;
+
+        #[allow(unused_mut)]
+        let mut dup = DetectDuplicates::default();
 
         for entry in walkdir::WalkDir::new(&self.root) {
             let entry = entry?;
@@ -64,8 +83,11 @@ impl Cli {
 
             // process
 
-            process(&mut db, entry.path()).await?;
+            // process(entry.path(), &mut dup).await?;
+            process(entry.path(), &mut db).await?;
         }
+
+        dup.dump();
 
         Ok(())
     }
@@ -90,10 +112,41 @@ impl Cli {
     }
 }
 
-async fn process(db: &mut Database, file: &Path) -> anyhow::Result<()> {
-    log::info!("Parsing: {}", file.display());
+trait Processor {
+    async fn process(&mut self, path: &Path, sbom: SPDX) -> anyhow::Result<()>;
+}
 
-    let file = file.to_path_buf();
+impl Processor for Database {
+    async fn process(&mut self, _path: &Path, sbom: SPDX) -> anyhow::Result<()> {
+        self.ingest(sbom).await
+    }
+}
+
+impl Processor for DetectDuplicates {
+    async fn process(&mut self, path: &Path, sbom: SPDX) -> anyhow::Result<()> {
+        self.0
+            .entry(sbom.document_creation_information.spdx_document_namespace)
+            .or_default()
+            .push(path.to_path_buf());
+
+        Ok(())
+    }
+}
+
+impl<F, Fut> Processor for F
+where
+    F: FnMut(SPDX) -> Fut,
+    Fut: Future<Output = anyhow::Result<()>>,
+{
+    async fn process(&mut self, _path: &Path, sbom: SPDX) -> anyhow::Result<()> {
+        (self)(sbom).await
+    }
+}
+
+async fn process<P: Processor>(path: &Path, p: &mut P) -> anyhow::Result<()> {
+    log::info!("Parsing: {}", path.display());
+
+    let file = path.to_path_buf();
     let sbom = spawn_blocking(move || {
         let processed = PathBuf::from(format!("{}.processed", file.display()));
 
@@ -103,25 +156,31 @@ async fn process(db: &mut Database, file: &Path) -> anyhow::Result<()> {
             ))?);
         }
 
-        let reader = BufReader::new(File::open(file)?);
+        log::info!("Processing: {}", file.display());
+
+        let reader = BufReader::new(File::open(&file)?);
         let reader = bzip2::bufread::BzDecoder::new(reader);
         let mut spdx = serde_json::from_reader(reader)?;
         fix_license(&mut spdx);
         let spdx: SPDX = serde_json::from_value(spdx)?;
 
-        serde_json::to_writer(BufWriter::new(File::create(processed)?), &spdx)?;
+        let tmp = PathBuf::from(format!("{}.tmp", file.display()));
+        serde_json::to_writer(BufWriter::new(File::create(&tmp)?), &spdx)?;
+        std::fs::rename(tmp, processed)?;
 
         Ok::<_, anyhow::Error>(spdx)
     })
     .await??;
 
     log::info!(
-        "Ingesting SBOM: {} / {}",
+        "Processing SBOM: {} / {}",
         sbom.document_creation_information.document_name,
         sbom.document_creation_information.spdx_document_namespace
     );
 
-    db.ingest(sbom).await?;
+    // db.ingest(sbom).await?;
+
+    p.process(path, sbom).await?;
 
     Ok(())
 }
