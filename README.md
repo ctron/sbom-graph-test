@@ -1,6 +1,6 @@
 # Testing Apache AGE
 
-The goal is to get a better understanding of SBOMs (SPDX SBOMs) in the context of graph databases. Using Apache AGE.
+The goal is to get a better understanding of SBOMs (SPDX SBOMs) in the context of graph databases. Not using Apache AGE.
 
 ## Fetching an initial dataset
 
